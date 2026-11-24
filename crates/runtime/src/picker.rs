@@ -552,7 +552,7 @@ pub(crate) fn draw_emoji(codepoints: &str, font: &str, out_path: &str) -> Option
             jvm::clear_exception(env);
             return None;
          }
-         Some(jvm::read_string(env, out))
+         jvm::read_string(env, out)
       })();
       jni!(env, PopLocalFrame, ptr::null_mut());
       result
