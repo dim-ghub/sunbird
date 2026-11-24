@@ -51,7 +51,7 @@ const settings = phoenix.settings.define({
     type: "switch",
     title: "Include your own messages",
     description: "Also render fake emojis, stickers, and GIFs in your own messages",
-    default: true,
+    default: false,
   },
 });
 
@@ -309,6 +309,8 @@ const stripFakeEmbeds = (embeds: Phoenix.Embed[] | undefined, record: Transforme
 
 type TransformableMessage = {
   id?: string;
+  channel_id?: string;
+  guild_id?: string;
   author?: { id?: string };
   content?: string;
   embeds?: Phoenix.Embed[];
@@ -317,7 +319,13 @@ type TransformableMessage = {
   message_snapshots?: { message?: TransformableMessage }[];
 };
 
-const transformSingle = (message: TransformableMessage): boolean => {
+// Phoenix's edit-restore guard records `shown -> original` whenever a gateway
+// `before` hook changes `content`. Rewriting a non-empty message to `""` there
+// would map `"" -> original`, causing every composer clear to refill the input.
+// Defer empty-content rewrites to `after` via `phoenix.enqueue` to bypass it.
+const deferredEmpty = new Map<string, Partial<Phoenix.GatewayMessage>>();
+
+const transformSingle = (message: TransformableMessage, allowEmptyContent: boolean): boolean => {
   if (!settings.renderFakeEmojis && !settings.renderFakeStickers && !settings.renderFakeGifs) {
     return false;
   }
@@ -443,8 +451,9 @@ const transformSingle = (message: TransformableMessage): boolean => {
   }
 
   let changed = false;
+  const deferEmpty = !allowEmptyContent && contentChanged && nextContent === "" && message.content !== "";
 
-  if (contentChanged && nextContent !== message.content) {
+  if (contentChanged && nextContent !== message.content && !deferEmpty) {
     message.content = nextContent;
     changed = true;
   }
@@ -464,33 +473,56 @@ const transformSingle = (message: TransformableMessage): boolean => {
     if (stripFakeEmbeds(message.embeds, record)) changed = true;
   }
 
+  if (deferEmpty && message.id && message.channel_id) {
+    deferredEmpty.set(message.id, {
+      id: message.id,
+      channel_id: message.channel_id,
+      ...(message.guild_id ? { guild_id: message.guild_id } : {}),
+      content: "",
+      ...(message.embeds ? { embeds: message.embeds } : {}),
+      ...(message.sticker_items ? { sticker_items: message.sticker_items } : {}),
+    });
+  }
+
   return changed;
 };
 
-const transformMessage = (message: TransformableMessage | null | undefined): boolean => {
+const transformMessage = (
+  message: TransformableMessage | null | undefined,
+  allowEmptyContent = true,
+): boolean => {
   if (!message || typeof message !== "object") return false;
-  let changed = transformSingle(message);
-  if (message.referenced_message && transformMessage(message.referenced_message)) {
+  let changed = transformSingle(message, allowEmptyContent);
+  if (message.referenced_message && transformMessage(message.referenced_message, true)) {
     changed = true;
   }
   if (Array.isArray(message.message_snapshots)) {
     for (const snap of message.message_snapshots) {
-      if (snap?.message && transformMessage(snap.message)) changed = true;
+      if (snap?.message && transformMessage(snap.message, true)) changed = true;
     }
   }
   return changed;
 };
 
+const flushDeferred = (message: Phoenix.GatewayMessage) => {
+  const pending = deferredEmpty.get(message.id);
+  if (!pending) return;
+  deferredEmpty.delete(message.id);
+  phoenix.enqueue(gateway.messageUpdate, pending);
+};
+
 phoenix.hook(gateway.messageCreate, {
   before(message) {
-    transformMessage(message);
+    transformMessage(message, false);
   },
+  after: flushDeferred,
 });
 
 phoenix.hook(gateway.messageUpdate, {
   before(message) {
-    transformMessage(message);
+    transformMessage(message, false);
   },
+  after: flushDeferred,
 });
 
 const transformMessageListResponse = (res: Phoenix.InterceptedResponse) => {
