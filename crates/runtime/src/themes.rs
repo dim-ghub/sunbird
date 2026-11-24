@@ -117,7 +117,9 @@ pub fn set_colors(selection: Option<ColorsSelection>) {
       let mut guard = applier();
       guard.set_colors(selection);
       save_state(guard.state());
-      guard.refresh_ops()
+      let ops = refresh_ops_for(&guard);
+      drop(guard);
+      ops
    };
    apply_refresh(&ops);
 }
@@ -127,7 +129,9 @@ pub fn set_fonts(selection: Option<FontsSelection>) {
       let mut guard = applier();
       guard.set_fonts(selection);
       save_state(guard.state());
-      guard.refresh_ops()
+      let ops = refresh_ops_for(&guard);
+      drop(guard);
+      ops
    };
    apply_refresh(&ops);
 }
@@ -137,7 +141,9 @@ pub fn set_icons(selection: Option<IconsSelection>) {
       let mut guard = applier();
       guard.set_icons(selection);
       save_state(guard.state());
-      guard.refresh_ops()
+      let ops = refresh_ops_for(&guard);
+      drop(guard);
+      ops
    };
    apply_refresh(&ops);
 }

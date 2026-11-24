@@ -224,14 +224,23 @@ impl ThemeApplier {
       let mut ops = Vec::with_capacity(self.originals.len());
       let active = self.is_active();
       for (&id, entry) in &self.originals {
-         if entry.props.is_empty() {
+         let is_text_like = matches!(entry.kind, ViewKind::Text | ViewKind::Input);
+         if entry.props.is_empty() && !is_text_like {
             continue;
          }
          let mut props = entry.props.clone();
          if active {
             let _ = self.apply_to_props(Some(&entry.kind), &mut props, draw_emoji);
          }
-         ops.push(Op::Update { id, props });
+         // Omitting `fontFamily` in `Op::Update` leaves a previously injected
+         // custom font on the Android view; send `Null` to restore Phoenix's
+         // default typeface when no override applies.
+         if is_text_like && get_prop(&props, Prop::FONT_FAMILY).is_none() {
+            props.push((Prop::FONT_FAMILY, Value::Null));
+         }
+         if !props.is_empty() {
+            ops.push(Op::Update { id, props });
+         }
       }
       ops
    }

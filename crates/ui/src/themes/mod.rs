@@ -256,4 +256,45 @@ mod tests {
          Some(&Value::Str("file:///cache/system/emoji-1f600.png".to_owned()))
       );
    }
+
+   #[test]
+   fn clearing_fonts_emits_null_font_family_for_text_nodes() {
+      let mut applier = ThemeApplier::new();
+      applier.set_fonts(Some(FontsSelection {
+         families: BTreeMap::from([(
+            "systemFont".to_owned(),
+            FontSource {
+               variants: vec![FontVariant {
+                  path:   "sans-serif".to_owned(),
+                  weight: 400,
+                  italic: false,
+                  axes:   BTreeMap::new(),
+               }],
+               ..FontSource::default()
+            },
+         )]),
+      }));
+
+      let mut ops = vec![Op::Create {
+         id:    42,
+         kind:  ViewKind::Text,
+         props: Vec::new(),
+      }];
+      assert!(applier.rewrite_batch(&mut ops));
+      let Op::Create { props, .. } = &ops[0] else {
+         panic!("expected Create");
+      };
+      assert_eq!(
+         get_prop(props, Prop::FONT_FAMILY),
+         Some(&Value::Str("sans-serif".to_owned()))
+      );
+
+      applier.set_fonts(None);
+      let refresh = applier.refresh_ops();
+      assert_eq!(refresh.len(), 1);
+      let Op::Update { id: 42, props } = &refresh[0] else {
+         panic!("expected Update for node 42");
+      };
+      assert_eq!(get_prop(props, Prop::FONT_FAMILY), Some(&Value::Null));
+   }
 }
