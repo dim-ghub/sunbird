@@ -12,7 +12,8 @@ const EMOJI_SUFFIX: &str = ".png";
 /// `emoji-1f600.png` or `emoji-1f44d-1f3fd@2x.png`.
 #[must_use]
 pub fn codepoints_from_asset(asset_name: &str) -> Option<String> {
-   let file = Path::new(asset_name).file_name()?.to_str()?;
+   let clean = asset_name.split(['?', '#']).next().unwrap_or(asset_name);
+   let file = Path::new(clean).file_name()?.to_str()?;
    let stem = file.strip_suffix(EMOJI_SUFFIX).unwrap_or(file);
    let normalized = stem.rsplit_once('@').map_or(stem, |(base, _)| base);
    let codepoints = normalized.strip_prefix(EMOJI_PREFIX)?;

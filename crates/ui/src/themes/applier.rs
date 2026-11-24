@@ -51,6 +51,9 @@ const BG_SHADOW: Prop = prop!("bgShadow");
 const SWIPE_SHADOW: Prop = prop!("swipeShadow");
 const FONT_WEIGHT: Prop = prop!("fontWeight");
 const ITALIC: Prop = prop!("italic");
+const IMAGE: Prop = prop!("image");
+const ICON: Prop = prop!("icon");
+const LEADING_ICON: Prop = prop!("leadingIcon");
 
 /// Renders `(codepoints, font)` into a local PNG path for font-based emoji
 /// packs.
@@ -295,8 +298,6 @@ impl ThemeApplier {
          for (prop, value) in props.iter_mut() {
             if let Some(category) = color_prop_category(*prop) {
                changed |= remap_color_value(&self.palette, value, category);
-            } else if *prop == SPANS || *prop == VALUE_SPANS {
-               changed |= remap_spans(&self.palette, value);
             } else if is_gradient_prop(*prop) {
                changed |= remap_gradient(&self.palette, value);
             } else if is_shadow_prop(*prop) {
@@ -305,9 +306,17 @@ impl ThemeApplier {
          }
       }
 
+      if !self.palette.is_empty() || self.state.icons.is_some() || self.state.emoji.is_some() {
+         for (prop, value) in props.iter_mut() {
+            if *prop == SPANS || *prop == VALUE_SPANS {
+               changed |= self.remap_spans(value, draw_emoji);
+            }
+         }
+      }
+
       if self.state.icons.is_some() || self.state.emoji.is_some() {
          for (prop, value) in props.iter_mut() {
-            if *prop != Prop::URI {
+            if !is_uri_prop(*prop) {
                continue;
             }
             let Value::Str(uri) = value else {
@@ -341,6 +350,56 @@ impl ThemeApplier {
          }
       }
 
+      changed
+   }
+
+   fn remap_spans(
+      &self,
+      value: &mut Value,
+      draw_emoji: Option<EmojiRenderer<'_>>,
+   ) -> bool {
+      let Value::Arr(spans) = value else {
+         return false;
+      };
+      let color_key = Prop::COLOR.key();
+      let bg_key = BG.key();
+      let bg_border_key = BG_BORDER.key();
+      let uri_key = Prop::URI.key();
+      let image_key = IMAGE.key();
+      let icon_key = ICON.key();
+      let remap_colors = !self.palette.is_empty();
+      let remap_uris = self.state.icons.is_some() || self.state.emoji.is_some();
+      let mut changed = false;
+      for span in spans {
+         let Value::Obj(entries) = span else {
+            continue;
+         };
+         for (key, field_val) in entries {
+            if remap_colors {
+               if *key == color_key {
+                  changed |= remap_color_value(&self.palette, field_val, Category::Text);
+                  continue;
+               }
+               if *key == bg_key {
+                  changed |= remap_color_value(&self.palette, field_val, Category::Background);
+                  continue;
+               }
+               if *key == bg_border_key {
+                  changed |= remap_color_value(&self.palette, field_val, Category::Border);
+                  continue;
+               }
+            }
+            if remap_uris
+               && (*key == uri_key || *key == image_key || *key == icon_key)
+               && let Value::Str(uri) = field_val
+               && let Some(replacement) = self.resolve_uri(uri, draw_emoji)
+               && replacement != *uri
+            {
+               *uri = replacement;
+               changed = true;
+            }
+         }
+      }
       changed
    }
 
@@ -437,10 +496,14 @@ fn is_themeable_prop(prop: Prop) -> bool {
       || prop == VALUE_SPANS
       || is_gradient_prop(prop)
       || is_shadow_prop(prop)
-      || prop == Prop::URI
+      || is_uri_prop(prop)
       || prop == Prop::FONT_FAMILY
       || prop == FONT_WEIGHT
       || prop == ITALIC
+}
+
+const fn is_uri_prop(prop: Prop) -> bool {
+   matches!(prop, Prop::URI | IMAGE | ICON | LEADING_ICON)
 }
 
 const fn color_prop_category(prop: Prop) -> Option<Category> {
@@ -506,31 +569,6 @@ fn remap_color_value(palette: &ColorPalette, value: &mut Value, category: Catego
    }
    write_argb(value, next);
    true
-}
-
-fn remap_spans(palette: &ColorPalette, value: &mut Value) -> bool {
-   let Value::Arr(spans) = value else {
-      return false;
-   };
-   let color_key = Prop::COLOR.key();
-   let bg_key = BG.key();
-   let bg_border_key = BG_BORDER.key();
-   let mut changed = false;
-   for span in spans {
-      let Value::Obj(entries) = span else {
-         continue;
-      };
-      for (key, field_val) in entries {
-         if *key == color_key {
-            changed |= remap_color_value(palette, field_val, Category::Text);
-         } else if *key == bg_key {
-            changed |= remap_color_value(palette, field_val, Category::Background);
-         } else if *key == bg_border_key {
-            changed |= remap_color_value(palette, field_val, Category::Border);
-         }
-      }
-   }
-   changed
 }
 
 fn remap_gradient(palette: &ColorPalette, value: &mut Value) -> bool {
