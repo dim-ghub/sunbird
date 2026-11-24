@@ -480,7 +480,8 @@ fn snake_to_pascal_icon(snake: &str) -> String {
 }
 
 fn as_file_uri(path: &str) -> String {
-   if path.starts_with("file://")
+   if path.starts_with("data:")
+      || path.starts_with("file://")
       || path.starts_with("https://")
       || path.starts_with("http://")
       || path.starts_with("res://")

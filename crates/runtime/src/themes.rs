@@ -323,7 +323,12 @@ pub const fn system_palettes() -> Option<std::collections::BTreeMap<String, Vec<
 
 #[cfg(target_os = "android")]
 mod android {
-   use std::{collections::BTreeMap, ffi::CString, ptr};
+   use std::{
+      collections::{BTreeMap, HashMap},
+      ffi::CString,
+      ptr,
+      sync::{LazyLock, Mutex, PoisonError},
+   };
 
    use jni_sys::jvalue;
    use phoenix_ui::{decode, encode, themes::ThemeBase};
@@ -360,20 +365,35 @@ mod android {
       }
    }
 
+   /// In-memory cache of `(font, codepoints) -> data:image/png;base64,...` so
+   /// repeated emoji in a chat batch avoid JNI round-trips.
+   static EMOJI_DATA_URIS: LazyLock<Mutex<HashMap<(String, String), String>>> =
+      LazyLock::new(|| Mutex::new(HashMap::new()));
+
    /// Renders `codepoints` with `font` (`"system"` or a `.ttf` path) into
-   /// `<home>/themes/emoji-cache/<hash>/emoji-<codepoints>.png`, reusing cached
-   /// files on disk.
+   /// `<home>/themes/emoji-cache/<hash>/emoji-<codepoints>.png` and returns a
+   /// `data:image/png;base64,...` URI for Phoenix's image loader.
    pub fn draw_cached_emoji(codepoints: &str, font: &str) -> Option<String> {
+      let key = (font.to_owned(), codepoints.to_owned());
+      if let Some(cached) = EMOJI_DATA_URIS
+         .lock()
+         .unwrap_or_else(PoisonError::into_inner)
+         .get(&key)
+      {
+         return Some(cached.clone());
+      }
       let base = crate::themes::themes_dir()?;
       let hash = crc32fast::hash(font.as_bytes());
       let out = base
          .join("emoji-cache")
          .join(format!("{hash:08x}"))
          .join(format!("emoji-{codepoints}.png"));
-      if out.is_file() {
-         return Some(out.to_string_lossy().into_owned());
-      }
-      crate::picker::draw_emoji(codepoints, font, &out.to_string_lossy())
+      let data_uri = crate::picker::draw_emoji(codepoints, font, &out.to_string_lossy())?;
+      EMOJI_DATA_URIS
+         .lock()
+         .unwrap_or_else(PoisonError::into_inner)
+         .insert(key, data_uri.clone());
+      Some(data_uri)
    }
 
    /// Installs the theme UI-op sink on the bridge.

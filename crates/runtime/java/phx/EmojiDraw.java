@@ -5,14 +5,18 @@ import android.graphics.Canvas;
 import android.graphics.Paint;
 import android.graphics.Rect;
 import android.graphics.Typeface;
+import android.util.Base64;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.util.UUID;
 
 /**
  * Renders a Unicode emoji sequence to a 128x128 PNG using either Android's
- * system emoji font ("system") or a custom font file path. Compiled into
- * picker.dex by crates/runtime/build.rs.
+ * system emoji font ("system") or a custom font file path, caching the PNG at
+ * outPath and returning a `data:image/png;base64,...` URI for Phoenix's image
+ * loader (`jd.p`). Compiled into picker.dex by crates/runtime/build.rs.
  */
 public final class EmojiDraw {
     private static final int SIZE = 128;
@@ -24,7 +28,12 @@ public final class EmojiDraw {
             return null;
         }
         File target = new File(outPath);
-        if (target.isFile()) return outPath;
+        if (target.isFile()) {
+            byte[] cached = readFile(target);
+            if (cached != null && cached.length > 0) {
+                return "data:image/png;base64," + Base64.encodeToString(cached, Base64.NO_WRAP);
+            }
+        }
 
         String text = decodeCodepoints(codepoints);
         if (text == null || text.isEmpty()) return null;
@@ -55,25 +64,41 @@ public final class EmojiDraw {
         float y = SIZE / 2f - bounds.exactCenterY();
         canvas.drawText(text, x, y, paint);
 
+        byte[] png;
+        try {
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, baos)) return null;
+            png = baos.toByteArray();
+        } finally {
+            bitmap.recycle();
+        }
+
+        writeFileAtomic(target, png);
+        return "data:image/png;base64," + Base64.encodeToString(png, Base64.NO_WRAP);
+    }
+
+    private static void writeFileAtomic(File target, byte[] bytes) {
         File parent = target.getParentFile();
         if (parent != null && !parent.isDirectory()) parent.mkdirs();
         File tmp = new File(parent, ".emoji-" + UUID.randomUUID() + ".tmp");
         try (FileOutputStream stream = new FileOutputStream(tmp)) {
-            if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, stream)) {
-                tmp.delete();
-                return null;
-            }
+            stream.write(bytes);
         } catch (Throwable t) {
             tmp.delete();
+            return;
+        }
+        if (!tmp.renameTo(target)) tmp.delete();
+    }
+
+    private static byte[] readFile(File file) {
+        try (FileInputStream in = new FileInputStream(file)) {
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            byte[] buf = new byte[8192];
+            for (int n; (n = in.read(buf)) > 0; ) out.write(buf, 0, n);
+            return out.toByteArray();
+        } catch (Throwable t) {
             return null;
-        } finally {
-            bitmap.recycle();
         }
-        if (!tmp.renameTo(target)) {
-            tmp.delete();
-            return target.isFile() ? outPath : null;
-        }
-        return outPath;
     }
 
     private static String decodeCodepoints(String codepoints) {
