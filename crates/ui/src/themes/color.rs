@@ -1,6 +1,9 @@
 //! Color parsing and Discord token-to-ARGB remapping.
 
-use std::{collections::HashMap, sync::OnceLock};
+use std::{
+   collections::{BTreeMap, HashMap},
+   sync::OnceLock,
+};
 
 use serde::Deserialize;
 
@@ -72,6 +75,27 @@ impl TokenTable {
    pub fn semantic_argb(&self, name: &str, base: ThemeBase) -> Option<(Category, u32)> {
       let (category, values) = self.semantic.get(&name.to_ascii_uppercase())?;
       Some((*category, values[base.token_index()]))
+   }
+
+   /// All raw tokens formatted as `#rrggbb` (or `#rrggbbaa` when translucent).
+   #[must_use]
+   pub fn raw_hex_map(&self) -> BTreeMap<String, String> {
+      self
+         .raw
+         .iter()
+         .map(|(name, &argb)| {
+            let r = (argb >> 16) & 0xFF;
+            let g = (argb >> 8) & 0xFF;
+            let b = argb & 0xFF;
+            let a = (argb >> 24) & 0xFF;
+            let hex = if a == 0xFF {
+               format!("#{r:02x}{g:02x}{b:02x}")
+            } else {
+               format!("#{r:02x}{g:02x}{b:02x}{a:02x}")
+            };
+            (name.clone(), hex)
+         })
+         .collect()
    }
 }
 

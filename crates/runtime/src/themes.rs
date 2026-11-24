@@ -295,13 +295,23 @@ fn apply_refresh(ops: &[phoenix_ui::Op]) {
 #[cfg(not(target_os = "android"))]
 const fn apply_refresh(_ops: &[phoenix_ui::Op]) {}
 
+#[cfg(not(target_os = "android"))]
+#[must_use]
+pub const fn system_palettes() -> Option<std::collections::BTreeMap<String, Vec<String>>> {
+   None
+}
+
 #[cfg(target_os = "android")]
 mod android {
+   use std::{collections::BTreeMap, ffi::CString, ptr};
+
+   use jni_sys::jvalue;
    use phoenix_ui::{decode, encode, themes::ThemeBase};
    use phoenix_wire::{HostCall, Value};
 
    use crate::{
       bridge::{self, Action, Sink},
+      jvm::{clear_exception, env, jni},
       themes::applier,
    };
 
@@ -365,7 +375,140 @@ mod android {
          _ => None,
       }
    }
+
+   const PALETTES: [&str; 5] = ["accent1", "accent2", "accent3", "neutral1", "neutral2"];
+   const SHADES: [u16; 13] = [0, 10, 50, 100, 200, 300, 400, 500, 600, 700, 800, 900, 1000];
+
+   /// Reads Android 12+ Material You dynamic palettes (`android:color/system_*`)
+   /// from the application's `Resources`. Returns `None` on Android < 12 or
+   /// when system resources are unavailable.
+   #[must_use]
+   pub fn system_palettes() -> Option<BTreeMap<String, Vec<String>>> {
+      let env = env()?;
+      // SAFETY: `env` belongs to the current thread, and PushLocalFrame frees
+      // all local references created inside the block.
+      unsafe {
+         if jni!(env, PushLocalFrame, 128) != 0 {
+            clear_exception(env);
+            return None;
+         }
+         let result = read_palettes_in_frame(env);
+         jni!(env, PopLocalFrame, ptr::null_mut());
+         result
+      }
+   }
+
+   /// # Safety
+   ///
+   /// Caller must hold a live `JNIEnv` inside a local frame.
+   unsafe fn read_palettes_in_frame(
+      env: *mut jni_sys::JNIEnv,
+   ) -> Option<BTreeMap<String, Vec<String>>> {
+      // SAFETY: JNI calls use valid class names, method signatures and object
+      // references checked for null and exceptions at each step.
+      unsafe {
+         let thread_cls = jni!(env, FindClass, c"android/app/ActivityThread".as_ptr());
+         if thread_cls.is_null() {
+            clear_exception(env);
+            return None;
+         }
+         let current_app = jni!(
+            env,
+            GetStaticMethodID,
+            thread_cls,
+            c"currentApplication".as_ptr(),
+            c"()Landroid/app/Application;".as_ptr()
+         );
+         if current_app.is_null() {
+            clear_exception(env);
+            return None;
+         }
+         let app = jni!(
+            env,
+            CallStaticObjectMethodA,
+            thread_cls,
+            current_app,
+            ptr::null()
+         );
+         if app.is_null() || jni!(env, ExceptionCheck) != 0 {
+            clear_exception(env);
+            return None;
+         }
+
+         let ctx_cls = jni!(env, GetObjectClass, app);
+         let get_res = jni!(
+            env,
+            GetMethodID,
+            ctx_cls,
+            c"getResources".as_ptr(),
+            c"()Landroid/content/res/Resources;".as_ptr()
+         );
+         if get_res.is_null() {
+            clear_exception(env);
+            return None;
+         }
+         let res = jni!(env, CallObjectMethodA, app, get_res, ptr::null());
+         if res.is_null() || jni!(env, ExceptionCheck) != 0 {
+            clear_exception(env);
+            return None;
+         }
+
+         let res_cls = jni!(env, GetObjectClass, res);
+         let get_id = jni!(
+            env,
+            GetMethodID,
+            res_cls,
+            c"getIdentifier".as_ptr(),
+            c"(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)I".as_ptr()
+         );
+         let get_color = jni!(
+            env,
+            GetMethodID,
+            res_cls,
+            c"getColor".as_ptr(),
+            c"(ILandroid/content/res/Resources$Theme;)I".as_ptr()
+         );
+         if get_id.is_null() || get_color.is_null() {
+            clear_exception(env);
+            return None;
+         }
+
+         let def_type = jni!(env, NewStringUTF, c"color".as_ptr());
+         let def_pkg = jni!(env, NewStringUTF, c"android".as_ptr());
+         let mut map = BTreeMap::new();
+         for palette in PALETTES {
+            let mut shades = Vec::with_capacity(SHADES.len());
+            for shade in SHADES {
+               let Ok(name) = CString::new(format!("system_{palette}_{shade}")) else {
+                  return None;
+               };
+               let jname = jni!(env, NewStringUTF, name.as_ptr());
+               let args = [
+                  jvalue { l: jname },
+                  jvalue { l: def_type },
+                  jvalue { l: def_pkg },
+               ];
+               let id = jni!(env, CallIntMethodA, res, get_id, args.as_ptr());
+               jni!(env, DeleteLocalRef, jname);
+               if id == 0 || jni!(env, ExceptionCheck) != 0 {
+                  clear_exception(env);
+                  return None;
+               }
+               let color_args = [jvalue { i: id }, jvalue { l: ptr::null_mut() }];
+               let color = jni!(env, CallIntMethodA, res, get_color, color_args.as_ptr());
+               if jni!(env, ExceptionCheck) != 0 {
+                  clear_exception(env);
+                  return None;
+               }
+               let rgb = color.cast_unsigned() & 0x00FF_FFFF;
+               shades.push(format!("#{rgb:06x}"));
+            }
+            map.insert(palette.to_owned(), shades);
+         }
+         Some(map)
+      }
+   }
 }
 
 #[cfg(target_os = "android")]
-pub use android::{observe_call, start, wants};
+pub use android::{observe_call, start, system_palettes, wants};

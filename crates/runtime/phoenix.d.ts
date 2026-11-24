@@ -1066,6 +1066,18 @@ declare namespace Phoenix {
     active: boolean;
   }
 
+  interface SystemPalettes {
+    accent1: string[];
+    accent2: string[];
+    accent3: string[];
+    neutral1: string[];
+    neutral2: string[];
+  }
+
+  interface ThemeTokens {
+    raw: Record<string, string>;
+  }
+
   interface Themes {
     getState(): ThemesState;
     setColors(selection: ColorsSelection | string | null): void;
@@ -1076,6 +1088,10 @@ declare namespace Phoenix {
     list(): InstalledTheme[];
     apply(id: string): void;
     clear(): void;
+    /// Android 12+ Material You tonal palettes (`accent1`..`neutral2`), or `null` when unavailable.
+    systemPalettes(): SystemPalettes | null;
+    /// Discord's default raw color token values (`RAW_NAME -> #rrggbb` / `#rrggbbaa`).
+    tokens(): ThemeTokens;
   }
 
   interface Bridge {

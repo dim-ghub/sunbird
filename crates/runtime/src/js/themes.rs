@@ -1,7 +1,9 @@
 //! `phoenix.themes`, exposing Valenced-compatible theme selection and installed
 //! theme management to plugins.
 
-use phoenix_ui::themes::{ColorsSelection, EmojiSelection, FontsSelection, IconsSelection};
+use phoenix_ui::themes::{
+   ColorsSelection, EmojiSelection, FontsSelection, IconsSelection, TokenTable,
+};
 use rquickjs::{Array, Ctx, Exception, Function, Object, Value, function::Opt};
 use serde::de::DeserializeOwned;
 
@@ -9,7 +11,12 @@ use crate::themes;
 
 pub fn themes_object<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
    let obj = Object::new(ctx.clone())?;
+   add_selection_methods(ctx, &obj)?;
+   add_info_methods(ctx, &obj)?;
+   Ok(obj)
+}
 
+fn add_selection_methods<'js>(ctx: &Ctx<'js>, obj: &Object<'js>) -> rquickjs::Result<()> {
    obj.set(
       "getState",
       Function::new(ctx.clone(), |ctx: Ctx<'js>| {
@@ -67,6 +74,11 @@ pub fn themes_object<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
       )?,
    )?;
 
+   Ok(())
+}
+
+fn add_info_methods<'js>(ctx: &Ctx<'js>, obj: &Object<'js>) -> rquickjs::Result<()> {
+
    obj.set(
       "base",
       Function::new(ctx.clone(), || themes::base().as_str())?,
@@ -105,7 +117,29 @@ pub fn themes_object<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
 
    obj.set("clear", Function::new(ctx.clone(), themes::clear_all)?)?;
 
-   Ok(obj)
+   obj.set(
+      "systemPalettes",
+      Function::new(ctx.clone(), |ctx: Ctx<'js>| {
+         let Some(palettes) = themes::system_palettes() else {
+            return Ok(Value::new_null(ctx));
+         };
+         let json = serde_json::to_string(&palettes)
+            .map_err(|err| Exception::throw_internal(&ctx, &err.to_string()))?;
+         ctx.json_parse(json)
+      })?,
+   )?;
+
+   obj.set(
+      "tokens",
+      Function::new(ctx.clone(), |ctx: Ctx<'js>| {
+         let raw = TokenTable::global().raw_hex_map();
+         let json = serde_json::to_string(&serde_json::json!({ "raw": raw }))
+            .map_err(|err| Exception::throw_internal(&ctx, &err.to_string()))?;
+         ctx.json_parse(json)
+      })?,
+   )?;
+
+   Ok(())
 }
 
 fn parse_optional<'js, T: DeserializeOwned>(
