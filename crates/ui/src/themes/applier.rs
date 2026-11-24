@@ -389,14 +389,30 @@ impl ThemeApplier {
                   continue;
                }
             }
-            if remap_uris
-               && (*key == uri_key || *key == image_key || *key == icon_key)
-               && let Value::Str(uri) = field_val
-               && let Some(replacement) = self.resolve_uri(uri, draw_emoji)
-               && replacement != *uri
-            {
-               *uri = replacement;
-               changed = true;
+            if remap_uris && (*key == uri_key || *key == image_key || *key == icon_key) {
+               match field_val {
+                  Value::Str(uri) => {
+                     if let Some(replacement) = self.resolve_uri(uri, draw_emoji)
+                        && replacement != *uri
+                     {
+                        *uri = replacement;
+                        changed = true;
+                     }
+                  },
+                  Value::Obj(nested) if *key == image_key => {
+                     for (nested_key, nested_val) in nested {
+                        if *nested_key == uri_key
+                           && let Value::Str(uri) = nested_val
+                           && let Some(replacement) = self.resolve_uri(uri, draw_emoji)
+                           && replacement != *uri
+                        {
+                           *uri = replacement;
+                           changed = true;
+                        }
+                     }
+                  },
+                  _ => {},
+               }
             }
          }
       }

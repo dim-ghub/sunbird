@@ -231,7 +231,21 @@ mod tests {
          Op::Create {
             id:    11,
             kind:  ViewKind::Image,
-            props: vec![(Prop::URI, Value::Str("emoji-1f600.png".to_owned()))],
+            props: vec![(Prop::URI, Value::Str("emoji://1f600".to_owned()))],
+         },
+         Op::Create {
+            id:    12,
+            kind:  ViewKind::Text,
+            props: vec![(
+               prop!("spans"),
+               Value::Arr(vec![Value::Obj(vec![(
+                  prop!("image").key(),
+                  Value::Obj(vec![(
+                     Prop::URI.key(),
+                     Value::Str("emoji://1f44d-1f3fd".to_owned()),
+                  )]),
+               )])]),
+            )],
          },
       ];
 
@@ -254,6 +268,21 @@ mod tests {
       assert_eq!(
          get_prop(p11, Prop::URI),
          Some(&Value::Str("file:///cache/system/emoji-1f600.png".to_owned()))
+      );
+
+      let Op::Create { props: p12, .. } = &ops[2] else {
+         panic!("expected Create");
+      };
+      let Some(Value::Arr(spans)) = get_prop(p12, prop!("spans")) else {
+         panic!("expected spans");
+      };
+      assert_eq!(
+         spans[0]
+            .field(prop!("image").key())
+            .and_then(|image| image.field(Prop::URI.key())),
+         Some(&Value::Str(
+            "file:///cache/system/emoji-1f44d-1f3fd.png".to_owned()
+         ))
       );
    }
 

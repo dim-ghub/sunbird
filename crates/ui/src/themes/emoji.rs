@@ -9,14 +9,18 @@ const EMOJI_PREFIX: &str = "emoji-";
 const EMOJI_SUFFIX: &str = ".png";
 
 /// Extracts lowercase hex codepoints from an asset name like
-/// `emoji-1f600.png` or `emoji-1f44d-1f3fd@2x.png`.
+/// `emoji://1f600`, `emoji-1f600.png`, or `emoji-1f44d-1f3fd@2x.png`.
 #[must_use]
 pub fn codepoints_from_asset(asset_name: &str) -> Option<String> {
    let clean = asset_name.split(['?', '#']).next().unwrap_or(asset_name);
-   let file = Path::new(clean).file_name()?.to_str()?;
-   let stem = file.strip_suffix(EMOJI_SUFFIX).unwrap_or(file);
-   let normalized = stem.rsplit_once('@').map_or(stem, |(base, _)| base);
-   let codepoints = normalized.strip_prefix(EMOJI_PREFIX)?;
+   let codepoints = if let Some(rest) = clean.strip_prefix("emoji://") {
+      rest.trim_end_matches('/')
+   } else {
+      let file = Path::new(clean).file_name()?.to_str()?;
+      let stem = file.strip_suffix(EMOJI_SUFFIX).unwrap_or(file);
+      let normalized = stem.rsplit_once('@').map_or(stem, |(base, _)| base);
+      normalized.strip_prefix(EMOJI_PREFIX)?
+   };
    if codepoints.is_empty() {
       return None;
    }
