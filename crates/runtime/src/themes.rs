@@ -430,7 +430,7 @@ mod android {
             current_app,
             ptr::null()
          );
-         if app.is_null() || jni!(env, ExceptionCheck) != 0 {
+         if app.is_null() || jni!(env, ExceptionCheck) {
             clear_exception(env);
             return None;
          }
@@ -448,7 +448,7 @@ mod android {
             return None;
          }
          let res = jni!(env, CallObjectMethodA, app, get_res, ptr::null());
-         if res.is_null() || jni!(env, ExceptionCheck) != 0 {
+         if res.is_null() || jni!(env, ExceptionCheck) {
             clear_exception(env);
             return None;
          }
@@ -490,13 +490,13 @@ mod android {
                ];
                let id = jni!(env, CallIntMethodA, res, get_id, args.as_ptr());
                jni!(env, DeleteLocalRef, jname);
-               if id == 0 || jni!(env, ExceptionCheck) != 0 {
+               if id == 0 || jni!(env, ExceptionCheck) {
                   clear_exception(env);
                   return None;
                }
                let color_args = [jvalue { i: id }, jvalue { l: ptr::null_mut() }];
                let color = jni!(env, CallIntMethodA, res, get_color, color_args.as_ptr());
-               if jni!(env, ExceptionCheck) != 0 {
+               if jni!(env, ExceptionCheck) {
                   clear_exception(env);
                   return None;
                }
