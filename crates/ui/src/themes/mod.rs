@@ -203,4 +203,57 @@ mod tests {
          Some("/italic.ttf")
       );
    }
+
+   #[test]
+   fn rewrites_pascal_case_icons_and_font_rendered_emoji() {
+      let mut applier = ThemeApplier::new();
+      applier.set_icons(Some(IconsSelection {
+         icons: BTreeMap::from([(
+            "ArrowLargeLeftIcon".to_owned(),
+            "https://example.com/ArrowLargeLeftIcon.png".to_owned(),
+         )]),
+         ..IconsSelection::default()
+      }));
+      applier.set_emoji(Some(EmojiSelection {
+         font: Some("system".to_owned()),
+         ..EmojiSelection::default()
+      }));
+
+      let mut ops = vec![
+         Op::Create {
+            id:    10,
+            kind:  ViewKind::Image,
+            props: vec![(
+               Prop::URI,
+               Value::Str("res://ic_mana_arrow_large_left".to_owned()),
+            )],
+         },
+         Op::Create {
+            id:    11,
+            kind:  ViewKind::Image,
+            props: vec![(Prop::URI, Value::Str("emoji-1f600.png".to_owned()))],
+         },
+      ];
+
+      let render = |cp: &str, font: &str| Some(format!("/cache/{font}/emoji-{cp}.png"));
+      assert!(applier.rewrite_batch_with_emoji(&mut ops, Some(&render)));
+
+      let Op::Create { props: p10, .. } = &ops[0] else {
+         panic!("expected Create");
+      };
+      assert_eq!(
+         get_prop(p10, Prop::URI),
+         Some(&Value::Str(
+            "https://example.com/ArrowLargeLeftIcon.png".to_owned()
+         ))
+      );
+
+      let Op::Create { props: p11, .. } = &ops[1] else {
+         panic!("expected Create");
+      };
+      assert_eq!(
+         get_prop(p11, Prop::URI),
+         Some(&Value::Str("file:///cache/system/emoji-1f600.png".to_owned()))
+      );
+   }
 }

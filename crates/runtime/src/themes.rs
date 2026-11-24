@@ -147,7 +147,9 @@ pub fn set_emoji(selection: Option<EmojiSelection>) {
       let mut guard = applier();
       guard.set_emoji(selection);
       save_state(guard.state());
-      guard.refresh_ops()
+      let ops = refresh_ops_for(&guard);
+      drop(guard);
+      ops
    };
    apply_refresh(&ops);
 }
@@ -157,7 +159,9 @@ pub fn clear_all() {
       let mut guard = applier();
       guard.set_state(ThemesState::default());
       save_state(guard.state());
-      guard.refresh_ops()
+      let ops = refresh_ops_for(&guard);
+      drop(guard);
+      ops
    };
    apply_refresh(&ops);
 }
@@ -283,6 +287,16 @@ fn theme_id(file: &str) -> Option<&str> {
 }
 
 #[cfg(target_os = "android")]
+fn refresh_ops_for(guard: &ThemeApplier) -> Vec<phoenix_ui::Op> {
+   guard.refresh_ops_with_emoji(Some(&android::draw_cached_emoji))
+}
+
+#[cfg(not(target_os = "android"))]
+fn refresh_ops_for(guard: &ThemeApplier) -> Vec<phoenix_ui::Op> {
+   guard.refresh_ops()
+}
+
+#[cfg(target_os = "android")]
 fn apply_refresh(ops: &[phoenix_ui::Op]) {
    if ops.is_empty() {
       return;
@@ -327,7 +341,7 @@ mod android {
             Ok(ops) => ops,
             Err(_) => return Action::Pass,
          };
-         let changed = applier().rewrite_batch(&mut ops);
+         let changed = applier().rewrite_batch_with_emoji(&mut ops, Some(&draw_cached_emoji));
          if changed {
             Action::Replace(encode(&ops))
          } else {
@@ -338,6 +352,22 @@ mod android {
       fn dispatch(&self, _frame: &[u8]) -> Action {
          Action::Pass
       }
+   }
+
+   /// Renders `codepoints` with `font` (`"system"` or a `.ttf` path) into
+   /// `<home>/themes/emoji-cache/<hash>/emoji-<codepoints>.png`, reusing cached
+   /// files on disk.
+   pub fn draw_cached_emoji(codepoints: &str, font: &str) -> Option<String> {
+      let base = crate::themes::themes_dir()?;
+      let hash = crc32fast::hash(font.as_bytes());
+      let out = base
+         .join("emoji-cache")
+         .join(format!("{hash:08x}"))
+         .join(format!("emoji-{codepoints}.png"));
+      if out.is_file() {
+         return Some(out.to_string_lossy().into_owned());
+      }
+      crate::picker::draw_emoji(codepoints, font, &out.to_string_lossy())
    }
 
    /// Installs the theme UI-op sink on the bridge.

@@ -52,6 +52,10 @@ const SWIPE_SHADOW: Prop = prop!("swipeShadow");
 const FONT_WEIGHT: Prop = prop!("fontWeight");
 const ITALIC: Prop = prop!("italic");
 
+/// Renders `(codepoints, font)` into a local PNG path for font-based emoji
+/// packs.
+pub type EmojiRenderer<'a> = &'a dyn Fn(&str, &str) -> Option<String>;
+
 /// Live theme engine that rewrites UI-op batches and tracks original props for
 /// instant re-theming.
 pub struct ThemeApplier {
@@ -164,6 +168,16 @@ impl ThemeApplier {
    /// Records original themeable props from `ops` and rewrites `ops` in place
    /// when overrides are active. Returns `true` if any op was modified.
    pub fn rewrite_batch(&mut self, ops: &mut [Op]) -> bool {
+      self.rewrite_batch_with_emoji(ops, None)
+   }
+
+   /// Like [`Self::rewrite_batch`], with an optional callback that renders
+   /// `(codepoints, font)` into a local PNG path for font-based emoji packs.
+   pub fn rewrite_batch_with_emoji(
+      &mut self,
+      ops: &mut [Op],
+      draw_emoji: Option<EmojiRenderer<'_>>,
+   ) -> bool {
       if !self.base_explicit
          && let Some(inferred) = detect_base(ops)
          && inferred != self.base
@@ -182,11 +196,11 @@ impl ThemeApplier {
       for op in ops {
          match op {
             Op::Create { kind, props, .. } => {
-               changed |= self.apply_to_props(Some(kind), props);
+               changed |= self.apply_to_props(Some(kind), props, draw_emoji);
             },
             Op::Update { id, props } => {
                let kind = self.originals.get(id).map(|entry| entry.kind.clone());
-               changed |= self.apply_to_props(kind.as_ref(), props);
+               changed |= self.apply_to_props(kind.as_ref(), props, draw_emoji);
             },
             _ => {},
          }
@@ -198,6 +212,15 @@ impl ThemeApplier {
    /// props when cleared) across all tracked live nodes.
    #[must_use]
    pub fn refresh_ops(&self) -> Vec<Op> {
+      self.refresh_ops_with_emoji(None)
+   }
+
+   /// Like [`Self::refresh_ops`], with an optional font-based emoji renderer.
+   #[must_use]
+   pub fn refresh_ops_with_emoji(
+      &self,
+      draw_emoji: Option<EmojiRenderer<'_>>,
+   ) -> Vec<Op> {
       let mut ops = Vec::with_capacity(self.originals.len());
       let active = self.is_active();
       for (&id, entry) in &self.originals {
@@ -206,7 +229,7 @@ impl ThemeApplier {
          }
          let mut props = entry.props.clone();
          if active {
-            let _ = self.apply_to_props(Some(&entry.kind), &mut props);
+            let _ = self.apply_to_props(Some(&entry.kind), &mut props, draw_emoji);
          }
          ops.push(Op::Update { id, props });
       }
@@ -251,7 +274,12 @@ impl ThemeApplier {
       }
    }
 
-   fn apply_to_props(&self, kind: Option<&ViewKind>, props: &mut Props) -> bool {
+   fn apply_to_props(
+      &self,
+      kind: Option<&ViewKind>,
+      props: &mut Props,
+      draw_emoji: Option<EmojiRenderer<'_>>,
+   ) -> bool {
       let mut changed = false;
 
       if !self.palette.is_empty() {
@@ -276,7 +304,7 @@ impl ThemeApplier {
             let Value::Str(uri) = value else {
                continue;
             };
-            if let Some(replacement) = self.resolve_uri(uri)
+            if let Some(replacement) = self.resolve_uri(uri, draw_emoji)
                && replacement != *uri
             {
                *uri = replacement;
@@ -307,17 +335,24 @@ impl ThemeApplier {
       changed
    }
 
-   fn resolve_uri(&self, uri: &str) -> Option<String> {
+   fn resolve_uri(
+      &self,
+      uri: &str,
+      draw_emoji: Option<EmojiRenderer<'_>>,
+   ) -> Option<String> {
       if let Some(icons) = &self.state.icons
          && let Some(res_name) = uri.strip_prefix("res://")
       {
          let short = res_name.strip_prefix("ic_mana_").unwrap_or(res_name);
+         let pascal_icon = snake_to_pascal_icon(short);
          let replacement = icons
             .icons
             .get(res_name)
             .or_else(|| icons.icons.get(short))
+            .or_else(|| icons.icons.get(&pascal_icon))
             .or_else(|| icons.drawables.get(res_name))
-            .or_else(|| icons.drawables.get(short));
+            .or_else(|| icons.drawables.get(short))
+            .or_else(|| icons.drawables.get(&pascal_icon));
          if let Some(path) = replacement
             && !path.is_empty()
          {
@@ -325,14 +360,39 @@ impl ThemeApplier {
          }
       }
 
-      if let Some(emoji_sel) = &self.state.emoji
-         && let Some(path) = emoji::resolve_asset(emoji_sel, uri)
-      {
-         return Some(as_file_uri(&path.to_string_lossy()));
+      if let Some(emoji_sel) = &self.state.emoji {
+         if let Some(path) = emoji::resolve_asset(emoji_sel, uri) {
+            return Some(as_file_uri(&path.to_string_lossy()));
+         }
+         if let (Some(font), Some(render), Some(codepoints)) = (
+            emoji_sel.font.as_deref(),
+            draw_emoji,
+            emoji::codepoints_from_asset(uri),
+         ) && let Some(path) = render(&codepoints, font)
+         {
+            return Some(as_file_uri(&path));
+         }
       }
 
       None
    }
+}
+
+/// Converts a Phoenix `ic_mana_*` stem like `arrow_large_left` to Valenced's
+/// React Native icon name `ArrowLargeLeftIcon`.
+fn snake_to_pascal_icon(snake: &str) -> String {
+   let mut out = String::with_capacity(snake.len() + 4);
+   for part in snake.split('_').filter(|part| !part.is_empty()) {
+      let mut chars = part.chars();
+      if let Some(first) = chars.next() {
+         for upper in first.to_uppercase() {
+            out.push(upper);
+         }
+         out.push_str(chars.as_str());
+      }
+   }
+   out.push_str("Icon");
+   out
 }
 
 fn as_file_uri(path: &str) -> String {
