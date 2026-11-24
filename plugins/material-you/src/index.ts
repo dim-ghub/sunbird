@@ -24,6 +24,9 @@ const PLUGIN_ID = "material-you";
 const BASES: Phoenix.ThemeBase[] = ["dark", "darker", "midnight", "light"];
 const NEUTRAL_RAW = /^(PRIMARY|NEUTRAL)_\d+$/;
 const BRAND_RAW = /^(BRAND|BLURPLE)_\d+$/;
+const SANS_STYLES = ["Normal", "Medium", "Semibold", "Bold", "ExtraBold"];
+const ICONS_BASE_URL =
+  "https://raw.githubusercontent.com/dim-ghub/valenced-materialyou/main/themes/material-you";
 
 const SEMANTIC_ROLES: Partial<Record<keyof Roles, string[]>> = {
   onSurface: [
@@ -246,7 +249,7 @@ function buildColors(
   return { raw, semantic };
 }
 
-function apply(variant: string): void {
+function applyColors(variant: string): void {
   const palettes = phoenix.themes.systemPalettes();
   if (!palettes) {
     phoenix.log.warn("Material You requires Android 12+");
@@ -262,6 +265,79 @@ function apply(variant: string): void {
   });
 }
 
+function applyFont(enabled: boolean): void {
+  if (!enabled) {
+    if (phoenix.themes.getState().fonts?.families?.systemFont?.plugin === PLUGIN_ID) {
+      phoenix.themes.setFonts(null);
+    }
+    return;
+  }
+  const source: Phoenix.FontSource = {
+    plugin: PLUGIN_ID,
+    group: PLUGIN_ID,
+    pack: "system",
+    variants: [{ path: "sans-serif", weight: 400, italic: false }],
+  };
+  const families: Record<string, Phoenix.FontSource> = { systemFont: source };
+  for (const style of SANS_STYLES) {
+    families[`ggsans-${style}`] = source;
+  }
+  phoenix.themes.setFonts({ families });
+}
+
+function applyEmoji(enabled: boolean): void {
+  if (!enabled) {
+    if (phoenix.themes.getState().emoji?.plugin === PLUGIN_ID) {
+      phoenix.themes.setEmoji(null);
+    }
+    return;
+  }
+  phoenix.themes.setEmoji({
+    plugin: PLUGIN_ID,
+    group: PLUGIN_ID,
+    pack: "system",
+    font: "system",
+  });
+}
+
+function applyIconList(names: string[]): void {
+  const icons: Record<string, string> = {};
+  for (const name of names) {
+    icons[name] = `${ICONS_BASE_URL}/assets/icons/${name}.png`;
+  }
+  phoenix.themes.setIcons({
+    plugin: PLUGIN_ID,
+    group: PLUGIN_ID,
+    pack: "symbols",
+    icons,
+    drawables: {},
+  });
+}
+
+function applyIcons(enabled: boolean): void {
+  if (!enabled) {
+    if (phoenix.themes.getState().icons?.plugin === PLUGIN_ID) {
+      phoenix.themes.setIcons(null);
+    }
+    return;
+  }
+  const cached = phoenix.storage.get<string[]>("iconNames");
+  if (Array.isArray(cached) && cached.length > 0) {
+    applyIconList(cached);
+    return;
+  }
+  phoenix
+    .fetch(`${ICONS_BASE_URL}/icons.json`)
+    .then((res) => {
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const map = res.json<Record<string, unknown>>();
+      const names = Object.keys(map);
+      phoenix.storage.set("iconNames", names);
+      if (settings.materialIcons) applyIconList(names);
+    })
+    .catch((err) => phoenix.log.warn(`Material Symbols icons: ${err}`));
+}
+
 const settings = phoenix.settings.define({
   variant: {
     type: "select",
@@ -273,7 +349,34 @@ const settings = phoenix.settings.define({
     ],
     default: "system",
     onChange(value) {
-      apply(value);
+      applyColors(value);
+    },
+  },
+  systemFont: {
+    type: "switch",
+    title: "System font",
+    description: "Use your device's system font instead of gg sans",
+    default: true,
+    onChange(value) {
+      applyFont(value);
+    },
+  },
+  systemEmoji: {
+    type: "switch",
+    title: "System emoji",
+    description: "Render standard emoji with your device's emoji font",
+    default: true,
+    onChange(value) {
+      applyEmoji(value);
+    },
+  },
+  materialIcons: {
+    type: "switch",
+    title: "Material Symbols icons",
+    description: "Replace Discord icons with Material Symbols",
+    default: true,
+    onChange(value) {
+      applyIcons(value);
     },
   },
   refresh: {
@@ -281,16 +384,21 @@ const settings = phoenix.settings.define({
     title: "Refresh system colors",
     description: "Re-read your Android wallpaper palette",
     onPress() {
-      apply(settings.variant);
+      applyColors(settings.variant);
       phoenix.ui.toast("Refreshed Material You colors");
     },
   },
 });
 
-apply(settings.variant);
+applyColors(settings.variant);
+applyFont(settings.systemFont);
+applyEmoji(settings.systemEmoji);
+applyIcons(settings.materialIcons);
 
 phoenix.onUnload(() => {
-  if (phoenix.themes.getState().colors?.plugin === PLUGIN_ID) {
-    phoenix.themes.setColors(null);
-  }
+  const state = phoenix.themes.getState();
+  if (state.colors?.plugin === PLUGIN_ID) phoenix.themes.setColors(null);
+  if (state.fonts?.families?.systemFont?.plugin === PLUGIN_ID) phoenix.themes.setFonts(null);
+  if (state.icons?.plugin === PLUGIN_ID) phoenix.themes.setIcons(null);
+  if (state.emoji?.plugin === PLUGIN_ID) phoenix.themes.setEmoji(null);
 });
