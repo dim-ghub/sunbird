@@ -352,7 +352,9 @@ struct Posted<'a> {
 }
 
 /// Tells the platform a message's text from before and after the plugin
-/// hooks, when they changed it.
+/// hooks, when they changed it. Text a hook emptied is left out: the edit box
+/// is empty whenever nothing is typed, so restoring from `""` would refill it
+/// after every send.
 fn remember_original(before: &str, after: &str) {
    let (Ok(before), Ok(after)) = (
       serde_json::from_str::<Posted<'_>>(before),
@@ -362,6 +364,7 @@ fn remember_original(before: &str, after: &str) {
    };
    if let (Some(original), Some(shown)) = (before.content, after.content)
       && original != shown
+      && !shown.trim().is_empty()
       && let Some(platform) = crate::platform()
    {
       platform.rewritten(original.into_owned(), shown.into_owned());
