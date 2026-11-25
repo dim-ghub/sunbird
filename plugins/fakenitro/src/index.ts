@@ -69,19 +69,15 @@ interface CachedSticker {
   format_type: number;
 }
 
-interface TransformedRecord {
-  emojiIds: Set<string>;
-  stickerIds: Set<string>;
-}
-
 const emojis = new Map<string, Emoji>();
 const byName = new Map<string, Emoji[]>();
 const stickers = new Map<string, CachedSticker>();
 const channelGuild = new Map<string, string>();
 // The emoji last picked for each name, which `:name:` in the message box means.
 const picked = new Map<string, Emoji>();
-// Messages we rewrote, so delayed embed-only MESSAGE_UPDATE frames drop their fake embeds.
-const transformed = new Map<string, TransformedRecord>();
+// The emoji and sticker ids of messages we rewrote, so delayed embed-only
+// MESSAGE_UPDATE frames drop their fake embeds too.
+const transformed = new Map<string, Set<string>>();
 const TRANSFORMED_LIMIT = 2048;
 // The real tier and user id, before any spoofing. Unknown until the app's first API request.
 let premiumType = 0;
@@ -215,18 +211,19 @@ phoenix.messages.onSend((text, ctx) => {
 // --- Incoming rendering: turn fake Nitro emojis, stickers, and GIFs into real ones ---
 
 const CODE_SPLIT = /(```[\s\S]*?```|`[^`\n]+`)/g;
-const EMOJI_LINK_RE =
-  /\[([^\]\n]*)\]\((https?:\/\/(?:cdn\.discordapp\.com|media\.discordapp\.net)\/emojis\/(\d{15,22})\.(png|jpe?g|webp|gif)(?:[?#][^\s)<>]*)?)\)|(?<![<(\[])(https?:\/\/(?:cdn\.discordapp\.com|media\.discordapp\.net)\/emojis\/(\d{15,22})\.(png|jpe?g|webp|gif)(?:[?#][^\s)<>]*)?)/gi;
-const STICKER_LINK_RE =
-  /\[([^\]\n]*)\]\((https?:\/\/(?:media\.discordapp\.net|cdn\.discordapp\.com)\/stickers\/(\d{15,22})\.(png|webp|gif|apng|json)(?:[?#][^\s)<>]*)?)\)|(?<![<(\[])(https?:\/\/(?:media\.discordapp\.net|cdn\.discordapp\.com)\/stickers\/(\d{15,22})\.(png|webp|gif|apng|json)(?:[?#][^\s)<>]*)?)/gi;
+// `[label](url)` or a bare url (not inside `<...>`, `(...)` or `[...]`) to a CDN asset.
+const cdnLinks = (path: string, exts: string) => {
+  const url = `https?:\\/\\/(?:cdn\\.discordapp\\.com|media\\.discordapp\\.net)\\/${path}\\/\\d{15,22}\\.(?:${exts})(?:[?#][^\\s)<>]*)?`;
+  return new RegExp(`\\[([^\\]\\n]*)\\]\\((${url})\\)|(?<![<(\\[])(${url})`, "gi");
+};
+const EMOJI_LINK_RE = cdnLinks("emojis", "png|jpe?g|webp|gif");
+const STICKER_LINK_RE = cdnLinks("stickers", "png|webp|gif|apng|json");
+// The id and extension of a CDN asset url, or of an embed's.
+const ASSET_RE = /\/(emojis|stickers)\/(\d{15,22})\.(\w+)/i;
 const GIF_HYPERLINK_RE = /\[([^\]\n]*)\]\((https?:\/\/[^\s)<>]+)\)/g;
 const GIF_URL_RE =
   /^https?:\/\/(?:(?:www\.)?(?:tenor\.com\/view\/|giphy\.com\/gifs\/|klipy\.com\/gifs\/)|(?:media\d*|c|i)\.tenor\.com\/|(?:media\d*|i)\.giphy\.com\/|static\.klipy\.com\/|[^\s?#]+\.gif(?:[?#]|$))/i;
-const EMOJI_EMBED_RE =
-  /https?:\/\/(?:cdn\.discordapp\.com|media\.discordapp\.net)\/emojis\/(\d{15,22})\./i;
-const STICKER_EMBED_RE =
-  /https?:\/\/(?:media\.discordapp\.net|cdn\.discordapp\.com)\/stickers\/(\d{15,22})\./i;
-const INVISIBLE_LABEL_RE = /^[\s\u200B-\u200F\u2060\u2800\uFEFF._-]*$/;
+const INVISIBLE_LABEL_RE = /^[\s​-‏⁠⠀﻿._-]*$/;
 
 const safeDecode = (s: string) => {
   try {
@@ -242,65 +239,50 @@ const parseQuery = (url: string) => {
   const q = url.indexOf("?");
   if (q === -1) return out;
   const hash = url.indexOf("#", q);
-  const raw = url.slice(q + 1, hash === -1 ? url.length : hash);
-  for (const part of raw.split("&")) {
+  for (const part of url.slice(q + 1, hash === -1 ? url.length : hash).split("&")) {
     if (!part) continue;
     const eq = part.indexOf("=");
-    if (eq === -1) {
-      out.set(safeDecode(part).toLowerCase(), "");
-    } else {
-      out.set(safeDecode(part.slice(0, eq)).toLowerCase(), safeDecode(part.slice(eq + 1)));
-    }
+    const key = eq === -1 ? part : part.slice(0, eq);
+    out.set(safeDecode(key).toLowerCase(), eq === -1 ? "" : safeDecode(part.slice(eq + 1)));
   }
   return out;
 };
 
-const sanitizeEmojiName = (raw: string | undefined) => {
-  if (!raw) return "";
-  const cleaned = raw.replace(/^:+|:+$/g, "").replace(/[^a-zA-Z0-9_]/g, "");
+const emojiName = (raw: string | undefined) => {
+  const cleaned = (raw ?? "").replace(/^:+|:+$/g, "").replace(/[^a-zA-Z0-9_]/g, "");
   return cleaned.length >= 2 ? cleaned.slice(0, 32) : "";
 };
 
-const cleanStickerName = (raw: string | undefined) => {
-  if (!raw) return "";
-  return raw.replace(/[\u200B-\u200F\u2060\u2800\uFEFF]/g, "").trim().slice(0, 32);
-};
+const stickerName = (raw: string | undefined) =>
+  (raw ?? "").replace(/[​-‏⁠⠀﻿]/g, "").trim().slice(0, 32);
 
+// Sticker format types: 1 PNG, 2 APNG, 3 Lottie, 4 GIF.
 const stickerFormat = (id: string, ext: string, params: Map<string, string>) => {
   const cached = stickers.get(id);
   if (cached) return cached.format_type;
-  const lower = ext.toLowerCase();
-  if (lower === "gif") return 4;
-  if (lower === "json") return 3;
-  if (lower === "apng" || params.get("animated")?.toLowerCase() === "true") return 2;
+  if (ext === "gif") return 4;
+  if (ext === "json") return 3;
+  if (ext === "apng" || params.get("animated")?.toLowerCase() === "true") return 2;
   return 1;
 };
 
-const rememberTransformed = (id: string, record: TransformedRecord) => {
-  transformed.set(id, record);
+const rememberTransformed = (id: string, ids: Set<string>) => {
+  transformed.set(id, ids);
   if (transformed.size > TRANSFORMED_LIMIT) {
     const oldest = transformed.keys().next().value;
     if (oldest !== undefined) transformed.delete(oldest);
   }
 };
 
-const embedMatchesIds = (embed: Phoenix.Embed, re: RegExp, ids: Set<string>) => {
-  if (!ids.size) return false;
-  const candidates = [embed.url, embed.image?.url, embed.thumbnail?.url];
-  for (const u of candidates) {
-    if (!u) continue;
-    const m = re.exec(u);
-    if (m && ids.has(m[1])) return true;
-  }
-  return false;
-};
-
-const stripFakeEmbeds = (embeds: Phoenix.Embed[] | undefined, record: TransformedRecord) => {
-  if (!embeds?.length || (!record.emojiIds.size && !record.stickerIds.size)) return false;
+// Drops the image embeds Discord made for links we turned into emojis or stickers.
+const stripFakeEmbeds = (embeds: Phoenix.Embed[] | undefined, ids: Set<string>) => {
+  if (!embeds?.length || !ids.size) return false;
   const kept = embeds.filter(
     (embed) =>
-      !embedMatchesIds(embed, EMOJI_EMBED_RE, record.emojiIds) &&
-      !embedMatchesIds(embed, STICKER_EMBED_RE, record.stickerIds),
+      ![embed.url, embed.image?.url, embed.thumbnail?.url].some((url) => {
+        const asset = url && ASSET_RE.exec(url);
+        return !!asset && ids.has(asset[2]);
+      }),
   );
   if (kept.length === embeds.length) return false;
   embeds.splice(0, embeds.length, ...kept);
@@ -309,8 +291,6 @@ const stripFakeEmbeds = (embeds: Phoenix.Embed[] | undefined, record: Transforme
 
 type TransformableMessage = {
   id?: string;
-  channel_id?: string;
-  guild_id?: string;
   author?: { id?: string };
   content?: string;
   embeds?: Phoenix.Embed[];
@@ -319,259 +299,139 @@ type TransformableMessage = {
   message_snapshots?: { message?: TransformableMessage }[];
 };
 
-// Phoenix's edit-restore guard records `shown -> original` whenever a gateway
-// `before` hook changes `content`. Rewriting a non-empty message to `""` there
-// would map `"" -> original`, causing every composer clear to refill the input.
-// Defer empty-content rewrites to `after` via `phoenix.enqueue` to bypass it.
-const deferredEmpty = new Map<string, Partial<Phoenix.GatewayMessage>>();
+const rendering = () => settings.renderFakeEmojis || settings.renderFakeStickers || settings.renderFakeGifs;
 
-const transformSingle = (message: TransformableMessage, allowEmptyContent: boolean): boolean => {
-  if (!settings.renderFakeEmojis && !settings.renderFakeStickers && !settings.renderFakeGifs) {
-    return false;
+// Rewrites fake emoji and sticker links outside code into real ones, and
+// unwraps hyperlinked GIFs. Returns whether the text changed.
+const renderContent = (content: string, ids: Set<string>, found: Phoenix.StickerItem[]) => {
+  const parts = content.split(CODE_SPLIT);
+  for (let i = 0; i < parts.length; i += 2) {
+    if (!parts[i].includes("http")) continue;
+    if (settings.renderFakeEmojis) {
+      parts[i] = parts[i].replace(EMOJI_LINK_RE, (_m, label, mdUrl, bareUrl) => {
+        const url: string = mdUrl ?? bareUrl;
+        const [, , id, ext] = ASSET_RE.exec(url)!;
+        const params = parseQuery(url);
+        const flag = params.get("animated")?.toLowerCase();
+        const animated =
+          ext.toLowerCase() === "gif" || flag === "true" || flag === "1" || (flag !== "false" && !!emojis.get(id)?.animated);
+        ids.add(id);
+        const name = emojiName(params.get("name")) || emojis.get(id)?.name || emojiName(label) || "emoji";
+        return `<${animated ? "a" : ""}:${name}:${id}>`;
+      });
+    }
+    if (settings.renderFakeStickers) {
+      parts[i] = parts[i].replace(STICKER_LINK_RE, (_m, label, mdUrl, bareUrl) => {
+        const url: string = mdUrl ?? bareUrl;
+        const [, , id, ext] = ASSET_RE.exec(url)!;
+        const params = parseQuery(url);
+        ids.add(id);
+        if (!found.some((s) => s.id === id)) {
+          const name = stickers.get(id)?.name || stickerName(params.get("name")) || stickerName(label) || "Sticker";
+          found.push({ id, name, format_type: stickerFormat(id, ext.toLowerCase(), params) });
+        }
+        return "";
+      });
+    }
   }
-  if (!settings.renderOwnMessages && currentUserId && message.author?.id === currentUserId) {
-    return false;
+  let text = parts.join("");
+  if (found.length) text = text.replace(/[ \t]{2,}/g, " ").trim();
+
+  if (settings.renderFakeGifs && text.includes("](")) {
+    // A message that is only a hyperlinked GIF shows as the GIF alone when the link is bare.
+    const alone = /^\[[^\]\n]*\]\((https?:\/\/[^\s)<>]+)\)$/.exec(text.trim());
+    if (alone && GIF_URL_RE.test(alone[1])) return alone[1];
+    // Invisible-label GIF links beside text only hide the GIF's url; its embed stays.
+    const gifParts = text.split(CODE_SPLIT);
+    for (let i = 0; i < gifParts.length; i += 2) {
+      gifParts[i] = gifParts[i].replace(GIF_HYPERLINK_RE, (match, label: string, url: string) =>
+        GIF_URL_RE.test(url) && INVISIBLE_LABEL_RE.test(label) ? "" : match,
+      );
+    }
+    const unwrapped = gifParts.join("");
+    if (unwrapped !== text) text = unwrapped.replace(/[ \t]{2,}/g, " ").trim();
   }
+  return text;
+};
+
+const transformSingle = (message: TransformableMessage): boolean => {
+  if (!rendering()) return false;
+  if (!settings.renderOwnMessages && currentUserId && message.author?.id === currentUserId) return false;
 
   // Embed-only MESSAGE_UPDATE frames carry no `content`; strip fake embeds we already converted.
   if (typeof message.content !== "string") {
-    if (!message.id || !message.embeds?.length) return false;
-    const prev = transformed.get(message.id);
-    if (!prev) return false;
-    return stripFakeEmbeds(message.embeds, prev);
+    const prev = message.id && transformed.get(message.id);
+    return !!prev && stripFakeEmbeds(message.embeds, prev);
   }
-
   if (!message.content.includes("http")) return false;
 
-  const emojiIds = new Set<string>();
-  const stickerIds = new Set<string>();
-  const foundStickers: Phoenix.StickerItem[] = [];
-  let contentChanged = false;
+  const ids = new Set<string>();
+  const found: Phoenix.StickerItem[] = [];
+  const content = renderContent(message.content, ids, found);
+  let changed = content !== message.content;
+  message.content = content;
 
-  const parts = message.content.split(CODE_SPLIT);
-  for (let i = 0; i < parts.length; i += 2) {
-    let seg = parts[i];
-    if (!seg.includes("http")) continue;
-
-    if (settings.renderFakeEmojis && seg.includes("/emojis/")) {
-      const next = seg.replace(
-        EMOJI_LINK_RE,
-        (_m, label: string | undefined, mdUrl: string | undefined, mdId: string | undefined, mdExt: string | undefined, bareUrl: string | undefined, bareId: string | undefined, bareExt: string | undefined) => {
-          const url = mdUrl ?? bareUrl!;
-          const id = mdId ?? bareId!;
-          const ext = (mdExt ?? bareExt!).toLowerCase();
-          const params = parseQuery(url);
-          const cached = emojis.get(id);
-          const animatedParam = params.get("animated")?.toLowerCase();
-          const animated =
-            ext === "gif" ||
-            animatedParam === "true" ||
-            animatedParam === "1" ||
-            (animatedParam !== "false" && cached?.animated === true);
-          const name =
-            sanitizeEmojiName(params.get("name")) ||
-            cached?.name ||
-            sanitizeEmojiName(label) ||
-            "emoji";
-          emojiIds.add(id);
-          return `<${animated ? "a" : ""}:${name}:${id}>`;
-        },
-      );
-      if (next !== seg) {
-        seg = next;
-        contentChanged = true;
-      }
-    }
-
-    if (settings.renderFakeStickers && seg.includes("/stickers/")) {
-      const next = seg.replace(
-        STICKER_LINK_RE,
-        (_m, label: string | undefined, mdUrl: string | undefined, mdId: string | undefined, mdExt: string | undefined, bareUrl: string | undefined, bareId: string | undefined, bareExt: string | undefined) => {
-          const url = mdUrl ?? bareUrl!;
-          const id = mdId ?? bareId!;
-          const ext = mdExt ?? bareExt!;
-          const params = parseQuery(url);
-          const name =
-            stickers.get(id)?.name ||
-            cleanStickerName(params.get("name")) ||
-            cleanStickerName(label) ||
-            "Sticker";
-          const format_type = stickerFormat(id, ext, params);
-          stickerIds.add(id);
-          if (!foundStickers.some((s) => s.id === id)) {
-            foundStickers.push({ id, name, format_type });
-          }
-          return "";
-        },
-      );
-      if (next !== seg) {
-        seg = next;
-        contentChanged = true;
-      }
-    }
-
-    parts[i] = seg;
-  }
-
-  let nextContent = parts.join("");
-
-  if (stickerIds.size) {
-    nextContent = nextContent.replace(/[ \t]{2,}/g, " ").trim();
-  }
-
-  if (settings.renderFakeGifs && nextContent.includes("](")) {
-    const trimmed = nextContent.trim();
-    const standalone = /^\[([^\]\n]*)\]\((https?:\/\/[^\s)<>]+)\)$/.exec(trimmed);
-    if (standalone && GIF_URL_RE.test(standalone[2])) {
-      // Unwrap standalone hyperlinked GIF to its bare URL so Discord hides the URL and renders a native GIF.
-      nextContent = standalone[2];
-      contentChanged = true;
-    } else {
-      const gifParts = nextContent.split(CODE_SPLIT);
-      let gifChanged = false;
-      for (let i = 0; i < gifParts.length; i += 2) {
-        const seg = gifParts[i];
-        if (!seg.includes("](")) continue;
-        const replaced = seg.replace(GIF_HYPERLINK_RE, (match, label: string, url: string) => {
-          if (!GIF_URL_RE.test(url)) return match;
-          // Drop invisible-label GIF hyperlinks next to text so only the text and GIF embed show.
-          if (INVISIBLE_LABEL_RE.test(label)) return "";
-          return match;
-        });
-        if (replaced !== seg) {
-          gifParts[i] = replaced;
-          gifChanged = true;
-        }
-      }
-      if (gifChanged) {
-        nextContent = gifParts.join("").replace(/[ \t]{2,}/g, " ").trim();
-        contentChanged = true;
-      }
-    }
-  }
-
-  let changed = false;
-  const deferEmpty = !allowEmptyContent && contentChanged && nextContent === "" && message.content !== "";
-
-  if (contentChanged && nextContent !== message.content && !deferEmpty) {
-    message.content = nextContent;
+  const existing = message.sticker_items ?? [];
+  const added = found.filter((s) => !existing.some((e) => e.id === s.id));
+  if (added.length) {
+    message.sticker_items = [...existing, ...added];
     changed = true;
   }
-
-  if (foundStickers.length) {
-    const existing = message.sticker_items ?? [];
-    const added = foundStickers.filter((s) => !existing.some((e) => e.id === s.id));
-    if (added.length) {
-      message.sticker_items = [...existing, ...added];
-      changed = true;
-    }
+  if (ids.size) {
+    if (message.id) rememberTransformed(message.id, ids);
+    if (stripFakeEmbeds(message.embeds, ids)) changed = true;
   }
-
-  if (emojiIds.size || stickerIds.size) {
-    const record: TransformedRecord = { emojiIds, stickerIds };
-    if (message.id) rememberTransformed(message.id, record);
-    if (stripFakeEmbeds(message.embeds, record)) changed = true;
-  }
-
-  if (deferEmpty && message.id && message.channel_id) {
-    deferredEmpty.set(message.id, {
-      id: message.id,
-      channel_id: message.channel_id,
-      ...(message.guild_id ? { guild_id: message.guild_id } : {}),
-      content: "",
-      ...(message.embeds ? { embeds: message.embeds } : {}),
-      ...(message.sticker_items ? { sticker_items: message.sticker_items } : {}),
-    });
-  }
-
   return changed;
 };
 
-const transformMessage = (
-  message: TransformableMessage | null | undefined,
-  allowEmptyContent = true,
-): boolean => {
+const transformMessage = (message: TransformableMessage | null | undefined): boolean => {
   if (!message || typeof message !== "object") return false;
-  let changed = transformSingle(message, allowEmptyContent);
-  if (message.referenced_message && transformMessage(message.referenced_message, true)) {
-    changed = true;
-  }
-  if (Array.isArray(message.message_snapshots)) {
-    for (const snap of message.message_snapshots) {
-      if (snap?.message && transformMessage(snap.message, true)) changed = true;
-    }
+  let changed = transformSingle(message);
+  if (transformMessage(message.referenced_message)) changed = true;
+  for (const snap of message.message_snapshots ?? []) {
+    if (transformMessage(snap?.message)) changed = true;
   }
   return changed;
 };
 
-const flushDeferred = (message: Phoenix.GatewayMessage) => {
-  const pending = deferredEmpty.get(message.id);
-  if (!pending) return;
-  deferredEmpty.delete(message.id);
-  phoenix.enqueue(gateway.messageUpdate, pending);
-};
+for (const event of [gateway.messageCreate, gateway.messageUpdate]) {
+  phoenix.hook(event, {
+    before(message) {
+      transformMessage(message);
+    },
+  });
+}
 
-phoenix.hook(gateway.messageCreate, {
-  before(message) {
-    transformMessage(message, false);
-  },
-  after: flushDeferred,
-});
+// History loads pass through here on every channel open, so pages with
+// nothing to render are left unparsed.
+const worthParsing = (res: Phoenix.InterceptedResponse) =>
+  res.status >= 200 &&
+  res.status < 300 &&
+  rendering() &&
+  (res.body.includes("/emojis/") || res.body.includes("/stickers/") || res.body.includes("]("));
 
-phoenix.hook(gateway.messageUpdate, {
-  before(message) {
-    transformMessage(message, false);
-  },
-  after: flushDeferred,
-});
-
-const transformMessageListResponse = (res: Phoenix.InterceptedResponse) => {
-  if (res.status < 200 || res.status >= 300) return;
-  const data = res.json<unknown>();
+// A message list, the pins' `{ items: [{ message }] }`, or search's `{ messages: [[message]] }`.
+const transformListResponse = (res: Phoenix.InterceptedResponse) => {
+  if (!worthParsing(res)) return;
+  const data = res.json<
+    TransformableMessage[] | { items?: { message?: TransformableMessage }[]; messages?: TransformableMessage[][] }
+  >();
   if (!data) return;
+  const list = Array.isArray(data)
+    ? data
+    : [...(data.items ?? []).map((entry) => entry?.message), ...(data.messages ?? []).flat()];
   let changed = false;
-  if (Array.isArray(data)) {
-    for (const item of data) {
-      if (transformMessage(item as TransformableMessage)) changed = true;
-    }
-  } else if (typeof data === "object" && "items" in data && Array.isArray((data as { items: unknown[] }).items)) {
-    for (const entry of (data as { items: { message?: TransformableMessage }[] }).items) {
-      if (transformMessage(entry?.message)) changed = true;
-    }
-  }
-  return changed ? { body: data as object } : undefined;
-};
-
-phoenix.discord.onResponse(
-  { method: "GET", pathPrefix: "/channels/", pathSuffix: "/messages" },
-  transformMessageListResponse,
-);
-
-phoenix.discord.onResponse(
-  { method: "GET", pathPrefix: "/channels/", pathSuffix: "/pins" },
-  transformMessageListResponse,
-);
-
-const transformSearchResponse = (res: Phoenix.InterceptedResponse) => {
-  if (res.status < 200 || res.status >= 300) return;
-  const data = res.json<{ messages?: TransformableMessage[][] }>();
-  if (!data || !Array.isArray(data.messages)) return;
-  let changed = false;
-  for (const group of data.messages) {
-    if (!Array.isArray(group)) continue;
-    for (const msg of group) {
-      if (transformMessage(msg)) changed = true;
-    }
+  for (const message of list) {
+    if (transformMessage(message)) changed = true;
   }
   return changed ? { body: data } : undefined;
 };
 
-phoenix.discord.onResponse(
-  { method: "GET", pathPrefix: "/guilds/", pathSuffix: "/messages/search" },
-  transformSearchResponse,
-);
-
-phoenix.discord.onResponse(
-  { method: "GET", pathPrefix: "/channels/", pathSuffix: "/messages/search" },
-  transformSearchResponse,
-);
+for (const [pathPrefix, pathSuffix] of [
+  ["/channels/", "/messages"],
+  ["/channels/", "/pins"],
+  ["/channels/", "/messages/search"],
+  ["/guilds/", "/messages/search"],
+]) {
+  phoenix.discord.onResponse({ method: "GET", pathPrefix, pathSuffix }, transformListResponse);
+}
